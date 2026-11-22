@@ -51,7 +51,8 @@ class CodeUploadDatabaseTest {
     @Test void mapsAllSixFieldsAndSeparatesCaseSensitiveNames() {
         var source = new CodeUploadRequest("record", "org.예제", "RecordName", "import java.util.List;",
                 "\ufeffpackage org.예제;\r\n\t// A 🚀\r\nrecord RecordName() {}\r\n", " Java ");
-        assertEquals(HttpStatus.CREATED, create(source).status());
+        var saved = create(source);
+        assertEquals(HttpStatus.CREATED, saved.status());
         assertEquals(HttpStatus.CREATED, create(new CodeUploadRequest("class", "org.예제", "recordName", null,
                 "class recordName {}", "java")).status());
         assertEquals(HttpStatus.CREATED, create(new CodeUploadRequest("class", "Org.예제", "RecordName", null,
@@ -64,6 +65,8 @@ class CodeUploadDatabaseTest {
         assertEquals(source.imports(), row.get("IMPORTS"));
         assertEquals(source.code(), row.get("CODE"));
         assertEquals("java", row.get("LANGUAGE_NAME"));
+        assertEquals(source.code(), service.get(saved.sourceId()).code());
+        assertTrue(service.list(0).items().stream().anyMatch(item -> item.id().equals(saved.sourceId())));
     }
 
     @Test void concurrentInsertCreatesOneRowAndStaleConfirmDoesNotReplaceIt() throws Exception {
@@ -83,7 +86,9 @@ class CodeUploadDatabaseTest {
             assertEquals(HttpStatus.PRECONDITION_FAILED, stale.status());
             assertNotEquals(conflict.revision(), stale.revision());
             assertEquals("two", jdbc.queryForObject("SELECT `CODE` FROM `JAVA_CODES` WHERE `LANGUAGE_NAME`='python'", String.class));
-            assertEquals(HttpStatus.NO_CONTENT, replace(python("three"), quote(stale.revision())).status());
+            var replaced = replace(python("three"), quote(stale.revision()));
+            assertEquals(HttpStatus.NO_CONTENT, replaced.status());
+            assertEquals("three", service.get(replaced.sourceId()).code());
             assertEquals("three", jdbc.queryForObject("SELECT `CODE` FROM `JAVA_CODES` WHERE `LANGUAGE_NAME`='python'", String.class));
         }
     }

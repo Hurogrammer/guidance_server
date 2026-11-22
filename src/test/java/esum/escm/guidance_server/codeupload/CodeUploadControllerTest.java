@@ -10,6 +10,9 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.util.List;
+
+import static org.hamcrest.Matchers.matchesPattern;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.*;
@@ -36,7 +39,8 @@ class CodeUploadControllerTest {
 
     @Test void bindsSnakeCaseFieldsAndKeepsSourceWhitespace() throws Exception {
         mvc.perform(post(PATH).header("Authorization", ADMIN).contentType(MediaType.APPLICATION_JSON).content(JSON))
-                .andExpect(status().isCreated());
+                .andExpect(status().isCreated())
+                .andExpect(header().string("Location", matchesPattern(PATH + "/[0-9a-f]{64}")));
         verify(jdbc).update(contains("`CLASS_TYPE`, `PACKAGE`, `CLASS_NAME`, `IMPORTS`, `CODE`, `LANGUAGE_NAME`"),
                 eq("abstract_class"), eq("org.example"), eq("Upload"), eq("import java.util.List;"), eq("  // fixture\n"), eq("java"));
     }
@@ -68,14 +72,40 @@ class CodeUploadControllerTest {
         String previous = "a".repeat(64);
         String current = "b".repeat(64);
         String token = '"' + previous + '"';
-        when(service.create(any())).thenReturn(new CodeUploadService.Result(HttpStatus.CONFLICT, previous));
-        when(service.replace(any(), eq(token))).thenReturn(new CodeUploadService.Result(HttpStatus.PRECONDITION_FAILED, current));
+        when(service.create(any())).thenReturn(new CodeUploadService.Result(HttpStatus.CONFLICT, previous, null));
+        when(service.replace(any(), eq(token))).thenReturn(new CodeUploadService.Result(HttpStatus.PRECONDITION_FAILED, current, null));
         var endpoint = MockMvcBuilders.standaloneSetup(new CodeUploadController(service, auth)).build();
         endpoint.perform(post(PATH).header("Authorization", ADMIN).contentType(MediaType.APPLICATION_JSON).content(JSON))
                 .andExpect(status().isConflict()).andExpect(jsonPath("$.revision").value(previous));
         endpoint.perform(put(PATH).header("Authorization", ADMIN).header("If-Match", token)
                         .contentType(MediaType.APPLICATION_JSON).content(JSON))
                 .andExpect(status().isPreconditionFailed()).andExpect(jsonPath("$.revision").value(current));
+    }
+
+    @Test void listsMetadataAndReturnsExactSourceWithoutASession() throws Exception {
+        var service = mock(CodeUploadService.class);
+        String id = "a".repeat(64);
+        var summary = new CodeUploadService.SourceSummary(id, "Upload", "org.example", "class", "java");
+        String source = "package org.example;\r\n\tclass Upload {}\n";
+        when(service.list(0)).thenReturn(new CodeUploadService.SourcePage(List.of(summary), true));
+        when(service.get(id)).thenReturn(new CodeUploadService.Source(summary, source));
+        var endpoint = MockMvcBuilders.standaloneSetup(new CodeUploadController(service, auth)).build();
+        endpoint.perform(get(PATH))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items[0].id").value(id))
+                .andExpect(jsonPath("$.items[0].code").doesNotExist())
+                .andExpect(jsonPath("$.hasMore").value(true));
+        endpoint.perform(get(PATH + "/" + id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.summary.className").value("Upload"))
+                .andExpect(jsonPath("$.code").value(source));
+        verifyNoInteractions(auth);
+    }
+
+    @Test void rejectsInvalidPublicReads() throws Exception {
+        mvc.perform(get(PATH).param("page", "-1")).andExpect(status().isBadRequest());
+        mvc.perform(get(PATH + "/invalid")).andExpect(status().isBadRequest());
+        verifyNoInteractions(jdbc);
     }
 
     @Test void limitsUtf8SourceBytesAndUnicodeMetadata() {
