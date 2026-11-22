@@ -7,6 +7,7 @@ import org.springframework.core.io.Resource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
@@ -45,6 +46,23 @@ public class ContentService {
         requireMenu(menuId, false);
         return jdbc.query("SELECT " + COLUMNS + " FROM " + TABLE + " WHERE MENU_ID = ? ORDER BY SORT_ORDER, ID", MAPPER, menuId)
                 .stream().map(BlockRow::response).toList();
+    }
+
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void attachCode(String menuId, String userType, String reference, String admin) {
+        String menu = ContentMenuKey.of(menuId, userType);
+        requireMenu(menu, true);
+        var existing = jdbc.queryForList("SELECT ID FROM " + TABLE + " WHERE MENU_ID = ? AND TYPE = 'code' AND BINARY BODY = ?", String.class, menu, reference);
+        if (!existing.isEmpty()) return;
+        jdbc.update("INSERT INTO " + TABLE
+                        + " (ID, MENU_ID, SORT_ORDER, TYPE, BODY, CREATED_BY, ALLOW_AI, IS_OPENED) VALUES (?, ?, ?, 'code', ?, ?, 0, 1)",
+                UUID.randomUUID().toString(), menu, nextOrder(menu), reference, admin);
+    }
+
+    public String codeReference(String id) {
+        var rows = jdbc.queryForList("SELECT BODY FROM " + TABLE + " WHERE ID = ? AND TYPE = 'code' AND MENU_ID IS NOT NULL", String.class, id);
+        if (rows.isEmpty()) throw notFound("Code block not found");
+        return rows.getFirst();
     }
 
     @Transactional(rollbackFor = IOException.class)
@@ -86,8 +104,7 @@ public class ContentService {
         String body = validatedBody(request.body() == null ? "" : request.body(), request.type());
         int allowAi = validatedAllowAi(request.allowAi());
         requireMenu(menuId, true);
-        Integer maximum = jdbc.queryForObject("SELECT COALESCE(MAX(SORT_ORDER), 0) FROM " + TABLE + " WHERE MENU_ID = ?", Integer.class, menuId);
-        int order = Math.addExact(maximum == null ? 0 : maximum, 1);
+        int order = nextOrder(menuId);
         String id;
         if (request.type().equals("text")) {
             if (request.fileUrl() != null) throw badRequest("Text blocks cannot contain a file URL");
@@ -108,6 +125,9 @@ public class ContentService {
         if (patch.allowAi() != null) validatedAllowAi(patch.allowAi());
         BlockRow block = publishedBlock(id);
         requireMenu(block.menuId(), true);
+        if (block.type().equals("code") && (patch.body() != null || patch.fileUrl() != null)) {
+            throw badRequest("Use Add code to replace a saved source.");
+        }
         if (patch.body() != null) {
             jdbc.update("UPDATE " + TABLE + " SET BODY = ? WHERE ID = ?", validatedBody(patch.body(), block.type()), id);
         }
@@ -194,6 +214,11 @@ public class ContentService {
         var menus = jdbc.queryForList("SELECT MENU_ID FROM " + table + " WHERE MENU_ID = ?" + (lock ? " FOR UPDATE" : ""),
                 String.class, ContentMenuKey.menuId(id));
         if (menus.isEmpty()) throw notFound("Menu not found");
+    }
+
+    private int nextOrder(String menuId) {
+        Integer maximum = jdbc.queryForObject("SELECT COALESCE(MAX(SORT_ORDER), 0) FROM " + TABLE + " WHERE MENU_ID = ?", Integer.class, menuId);
+        return Math.addExact(maximum == null ? 0 : maximum, 1);
     }
 
     private int validatedAllowAi(Integer value) {

@@ -14,16 +14,12 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
-import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
-import java.net.URI;
-
-@CrossOrigin(exposedHeaders = HttpHeaders.LOCATION)
+@CrossOrigin
 @RestController
-@RequestMapping("/api/java-codes")
 public class CodeUploadController {
     private final CodeUploadService service;
     private final ContentAdminClient auth;
@@ -33,43 +29,41 @@ public class CodeUploadController {
         this.auth = auth;
     }
 
-    @GetMapping
-    public ResponseEntity<CodeUploadService.SourcePage> list(
-            @RequestParam(value = "page", defaultValue = "0") int page) {
-        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(service.list(page));
+    @GetMapping("/api/blocks/{blockId}/code")
+    public ResponseEntity<CodeUploadService.Source> get(@PathVariable("blockId") String blockId) {
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(service.get(blockId));
     }
 
-    @GetMapping("/{id}")
-    public ResponseEntity<CodeUploadService.Source> get(@PathVariable("id") String id) {
-        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(service.get(id));
+    @PostMapping("/api/menus/{menuId}/java-codes")
+    public ResponseEntity<?> create(
+            @PathVariable("menuId") String menuId, @RequestParam(value = "usrTpc", required = false) String userType,
+            @RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authorization,
+            @RequestBody CodeUploadRequest request) {
+        String admin = auth.requireAdmin(authorization);
+        return response(service.create(menuId, userType, admin, request));
     }
 
-    @PostMapping
-    public ResponseEntity<?> create(@RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authorization,
-                                    @RequestBody CodeUploadRequest request) {
-        auth.requireAdmin(authorization);
-        return response(service.create(request));
-    }
-
-    @PutMapping
-    public ResponseEntity<?> replace(@RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authorization,
-                                     @RequestHeader(value = HttpHeaders.IF_MATCH, required = false) String ifMatch,
-                                     @RequestBody CodeUploadRequest request) {
-        auth.requireAdmin(authorization);
-        return response(service.replace(request, ifMatch));
+    @PutMapping("/api/menus/{menuId}/java-codes")
+    public ResponseEntity<?> replace(
+            @PathVariable("menuId") String menuId, @RequestParam(value = "usrTpc", required = false) String userType,
+            @RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authorization,
+            @RequestHeader(value = HttpHeaders.IF_MATCH, required = false) String ifMatch,
+            @RequestBody CodeUploadRequest request) {
+        String admin = auth.requireAdmin(authorization);
+        return response(service.replace(menuId, userType, admin, request, ifMatch));
     }
 
     private ResponseEntity<?> response(CodeUploadService.Result result) {
         var response = ResponseEntity.status(result.status());
         if (result.status() == HttpStatus.CONFLICT) {
-            return response.body(new Conflict("Code already exists for this source.", result.revision()));
+            return response.body(new Conflict("Code already exists for this package and source name.", result.revision()));
         }
         if (result.status() == HttpStatus.PRECONDITION_FAILED) {
             String message = result.revision() == null ? "The saved source no longer exists. Use Save to add it."
                     : "The saved source changed. Confirm the replacement again.";
             return response.body(new Conflict(message, result.revision()));
         }
-        return response.location(URI.create("/api/java-codes/" + result.sourceId())).build();
+        return response.build();
     }
 
     @ExceptionHandler(ResponseStatusException.class)

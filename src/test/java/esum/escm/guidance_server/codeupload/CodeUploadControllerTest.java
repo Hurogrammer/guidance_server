@@ -1,6 +1,7 @@
 package esum.escm.guidance_server.codeupload;
 
 import esum.escm.guidance_server.content.ContentAdminClient;
+import esum.escm.guidance_server.content.ContentService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
@@ -10,9 +11,6 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.server.ResponseStatusException;
 
-import java.util.List;
-
-import static org.hamcrest.Matchers.matchesPattern;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.*;
@@ -20,13 +18,14 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 class CodeUploadControllerTest {
-    private static final String PATH = "/api/java-codes";
+    private static final String PATH = "/api/menus/01001001/java-codes";
     private static final String ADMIN = "Bearer admin-fixture";
     private static final String JSON = """
             {"class_type":"abstract_class","package":"org.example","class_name":"Upload",
              "imports":"import java.util.List;","code":"  // fixture\\n","language_name":" Java "}
             """;
     private final ContentAdminClient auth = mock(ContentAdminClient.class);
+    private final ContentService blocks = mock(ContentService.class);
     private final JdbcTemplate jdbc = mock(JdbcTemplate.class);
     private MockMvc mvc;
 
@@ -34,15 +33,16 @@ class CodeUploadControllerTest {
         when(auth.requireAdmin(null)).thenThrow(new ResponseStatusException(HttpStatus.UNAUTHORIZED));
         when(auth.requireAdmin("Bearer expired")).thenThrow(new ResponseStatusException(HttpStatus.UNAUTHORIZED));
         when(auth.requireAdmin("Bearer reader")).thenThrow(new ResponseStatusException(HttpStatus.FORBIDDEN));
-        mvc = MockMvcBuilders.standaloneSetup(new CodeUploadController(new CodeUploadService(jdbc), auth)).build();
+        when(auth.requireAdmin(ADMIN)).thenReturn("admin");
+        mvc = MockMvcBuilders.standaloneSetup(new CodeUploadController(new CodeUploadService(jdbc, blocks), auth)).build();
     }
 
     @Test void bindsSnakeCaseFieldsAndKeepsSourceWhitespace() throws Exception {
-        mvc.perform(post(PATH).header("Authorization", ADMIN).contentType(MediaType.APPLICATION_JSON).content(JSON))
-                .andExpect(status().isCreated())
-                .andExpect(header().string("Location", matchesPattern(PATH + "/[0-9a-f]{64}")));
+        mvc.perform(post(PATH).param("usrTpc", "99").header("Authorization", ADMIN).contentType(MediaType.APPLICATION_JSON).content(JSON))
+                .andExpect(status().isCreated());
         verify(jdbc).update(contains("`CLASS_TYPE`, `PACKAGE`, `CLASS_NAME`, `IMPORTS`, `CODE`, `LANGUAGE_NAME`"),
                 eq("abstract_class"), eq("org.example"), eq("Upload"), eq("import java.util.List;"), eq("  // fixture\n"), eq("java"));
+        verify(blocks).attachCode("01001001", "99", "org.example.Upload", "admin");
     }
 
     @Test void bothWritesRequireAValidAdminSession() throws Exception {
@@ -53,7 +53,7 @@ class CodeUploadControllerTest {
                 .andExpect(status().isForbidden());
         mvc.perform(put(PATH).header("Authorization", "Bearer reader").contentType(MediaType.APPLICATION_JSON).content(JSON))
                 .andExpect(status().isForbidden());
-        verifyNoInteractions(jdbc);
+        verifyNoInteractions(jdbc, blocks);
     }
 
     @Test void rejectsMissingLanguageAndUnconfirmedReplacement() throws Exception {
@@ -72,8 +72,10 @@ class CodeUploadControllerTest {
         String previous = "a".repeat(64);
         String current = "b".repeat(64);
         String token = '"' + previous + '"';
-        when(service.create(any())).thenReturn(new CodeUploadService.Result(HttpStatus.CONFLICT, previous, null));
-        when(service.replace(any(), eq(token))).thenReturn(new CodeUploadService.Result(HttpStatus.PRECONDITION_FAILED, current, null));
+        when(service.create(eq("01001001"), isNull(), eq("admin"), any()))
+                .thenReturn(new CodeUploadService.Result(HttpStatus.CONFLICT, previous));
+        when(service.replace(eq("01001001"), isNull(), eq("admin"), any(), eq(token)))
+                .thenReturn(new CodeUploadService.Result(HttpStatus.PRECONDITION_FAILED, current));
         var endpoint = MockMvcBuilders.standaloneSetup(new CodeUploadController(service, auth)).build();
         endpoint.perform(post(PATH).header("Authorization", ADMIN).contentType(MediaType.APPLICATION_JSON).content(JSON))
                 .andExpect(status().isConflict()).andExpect(jsonPath("$.revision").value(previous));
@@ -82,29 +84,22 @@ class CodeUploadControllerTest {
                 .andExpect(status().isPreconditionFailed()).andExpect(jsonPath("$.revision").value(current));
     }
 
-    @Test void listsMetadataAndReturnsExactSourceWithoutASession() throws Exception {
+    @Test void returnsExactSourceByBlockIdWithoutASession() throws Exception {
         var service = mock(CodeUploadService.class);
-        String id = "a".repeat(64);
-        var summary = new CodeUploadService.SourceSummary(id, "Upload", "org.example", "class", "java");
         String source = "package org.example;\r\n\tclass Upload {}\n";
-        when(service.list(0)).thenReturn(new CodeUploadService.SourcePage(List.of(summary), true));
-        when(service.get(id)).thenReturn(new CodeUploadService.Source(summary, source));
+        when(service.get("source-block")).thenReturn(new CodeUploadService.Source("org.example", "Upload", "class", "java", source));
         var endpoint = MockMvcBuilders.standaloneSetup(new CodeUploadController(service, auth)).build();
-        endpoint.perform(get(PATH))
+        endpoint.perform(get("/api/blocks/source-block/code"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.items[0].id").value(id))
-                .andExpect(jsonPath("$.items[0].code").doesNotExist())
-                .andExpect(jsonPath("$.hasMore").value(true));
-        endpoint.perform(get(PATH + "/" + id))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.summary.className").value("Upload"))
+                .andExpect(jsonPath("$.className").value("Upload"))
                 .andExpect(jsonPath("$.code").value(source));
+        endpoint.perform(get("/api/java-codes")).andExpect(status().isNotFound());
         verifyNoInteractions(auth);
     }
 
-    @Test void rejectsInvalidPublicReads() throws Exception {
-        mvc.perform(get(PATH).param("page", "-1")).andExpect(status().isBadRequest());
-        mvc.perform(get(PATH + "/invalid")).andExpect(status().isBadRequest());
+    @Test void rejectsInvalidStoredReference() throws Exception {
+        when(blocks.codeReference("bad-block")).thenReturn("invalid");
+        mvc.perform(get("/api/blocks/bad-block/code")).andExpect(status().isNotFound());
         verifyNoInteractions(jdbc);
     }
 
@@ -112,8 +107,8 @@ class CodeUploadControllerTest {
         assertEquals(HttpStatus.CONTENT_TOO_LARGE, assertThrows(ResponseStatusException.class,
                 () -> new CodeUploadRequest(null, "", "example", null, "한".repeat(333_334), "Python").validated()).getStatusCode());
         assertEquals(HttpStatus.BAD_REQUEST, assertThrows(ResponseStatusException.class,
-                () -> new CodeUploadRequest(null, "", "🚀".repeat(2001), null, "source", "Python").validated()).getStatusCode());
-        assertEquals("🚀".repeat(2000),
-                new CodeUploadRequest(null, "", "🚀".repeat(2000), null, "source", "Python").validated().className());
+                () -> new CodeUploadRequest(null, "", "🚀".repeat(201), null, "source", "Python").validated()).getStatusCode());
+        assertEquals("🚀".repeat(200),
+                new CodeUploadRequest(null, "", "🚀".repeat(200), null, "source", "Python").validated().className());
     }
 }

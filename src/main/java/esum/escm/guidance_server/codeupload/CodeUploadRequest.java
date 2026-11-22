@@ -36,11 +36,11 @@ public record CodeUploadRequest(
             throw new ResponseStatusException(HttpStatus.CONTENT_TOO_LARGE, "Source code must be 1 MB or smaller.");
         }
         if (!StandardCharsets.UTF_8.newEncoder().canEncode(code)) throw invalid("Source code must be valid UTF-8.");
-        checkMetadata(language, "Language name");
-        checkMetadata(name, "Source name");
-        checkMetadata(packageName, "Package");
-        checkMetadata(classType, "Class type");
-        checkMetadata(imports, "Imports");
+        checkMetadata(language, "Language name", 2000);
+        checkMetadata(name, "Source name", 200);
+        checkMetadata(packageName, "Package", 200);
+        checkMetadata(classType, "Class type", 2000);
+        checkMetadata(imports, "Imports", 2000);
 
         if (language.equals("java")) {
             if (classType == null || !JAVA_TYPES.contains(classType)) throw invalid("Choose a valid Java class type.");
@@ -53,9 +53,9 @@ public record CodeUploadRequest(
         return new CodeUploadRequest(classType, packageName, name, imports, code, language);
     }
 
-    private static void checkMetadata(String value, String field) {
+    private static void checkMetadata(String value, String field, int limit) {
         if (value == null) return;
-        if (value.codePointCount(0, value.length()) > 2000) throw invalid(field + " must be 2,000 characters or fewer.");
+        if (value.codePointCount(0, value.length()) > limit) throw invalid(field + " must be " + limit + " characters or fewer.");
         if (!StandardCharsets.UTF_8.newEncoder().canEncode(value)) throw invalid(field + " must be valid UTF-8.");
     }
 
