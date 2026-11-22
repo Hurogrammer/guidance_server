@@ -64,7 +64,7 @@ public class CodeUploadService {
             var existing = findRevision(key, false).orElseThrow(() -> error);
             return new Result(HttpStatus.CONFLICT, existing.token());
         }
-        content.attachCode(menuId, userType, key.reference(), admin);
+        content.attachCode(menuId, userType, key.reference(), source.description(), admin);
         return new Result(HttpStatus.CREATED, null);
     }
 
@@ -83,7 +83,7 @@ public class CodeUploadService {
         var key = existing.key();
         jdbc.update(UPDATE, source.classType(), source.imports(), source.code(), source.languageName(),
                 key.packageName(), key.className());
-        content.attachCode(menuId, userType, key.reference(), admin);
+        content.attachCode(menuId, userType, key.reference(), source.description(), admin);
         return new Result(HttpStatus.NO_CONTENT, null);
     }
 

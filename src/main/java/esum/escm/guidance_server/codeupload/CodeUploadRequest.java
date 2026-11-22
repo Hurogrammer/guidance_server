@@ -15,7 +15,8 @@ public record CodeUploadRequest(
         @JsonProperty("class_name") String className,
         String imports,
         String code,
-        @JsonProperty("language_name") String languageName) {
+        @JsonProperty("language_name") String languageName,
+        String description) {
     private static final Set<String> JAVA_TYPES = Set.of(
             "class", "abstract_class", "interface", "enum", "record", "annotation_interface");
     private static final String JAVA_IDENTIFIER = "\\p{javaJavaIdentifierStart}\\p{javaJavaIdentifierPart}*";
@@ -50,7 +51,7 @@ public record CodeUploadRequest(
         } else if (classType != null || !packageName.isEmpty() || imports != null) {
             throw invalid("Package, imports and class type apply only to Java source.");
         }
-        return new CodeUploadRequest(classType, packageName, name, imports, code, language);
+        return new CodeUploadRequest(classType, packageName, name, imports, code, language, description);
     }
 
     private static void checkMetadata(String value, String field, int limit) {

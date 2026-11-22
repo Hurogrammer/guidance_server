@@ -23,6 +23,7 @@ import java.util.regex.Pattern;
 @Service
 public class ContentService {
     private static final String TABLE = "`CONTENT BLOCKS`";
+    private static final String CODE_REFERENCE = "COALESCE(FILE_NAME, BODY)";
     private static final String COLUMNS = "ID, MENU_ID, SORT_ORDER, TYPE, BODY, FILE_NAME, CONTENT_TYPE, FILE_SIZE, CREATED_BY, ALLOW_AI, IS_OPENED";
     private static final Set<String> TYPES = Set.of("text", "image", "video", "file");
     private static final Pattern FILE_PATH = Pattern.compile("(?:.*/)?api/files/([0-9a-fA-F-]{36})");
@@ -49,18 +50,24 @@ public class ContentService {
     }
 
     @Transactional(propagation = Propagation.MANDATORY)
-    public void attachCode(String menuId, String userType, String reference, String admin) {
+    public void attachCode(String menuId, String userType, String reference, String description, String admin) {
         String menu = ContentMenuKey.of(menuId, userType);
+        String body = description == null ? null : validatedBody(description, "code");
         requireMenu(menu, true);
-        var existing = jdbc.queryForList("SELECT ID FROM " + TABLE + " WHERE MENU_ID = ? AND TYPE = 'code' AND BINARY BODY = ?", String.class, menu, reference);
-        if (!existing.isEmpty()) return;
+        var existing = jdbc.queryForList("SELECT ID FROM " + TABLE
+                + " WHERE MENU_ID = ? AND TYPE = 'code' AND CAST(" + CODE_REFERENCE + " AS BINARY) = ?", String.class, menu, reference);
+        if (!existing.isEmpty()) {
+            if (body != null) updateCodeDescription(existing.getFirst(), body);
+            return;
+        }
         jdbc.update("INSERT INTO " + TABLE
-                        + " (ID, MENU_ID, SORT_ORDER, TYPE, BODY, CREATED_BY, ALLOW_AI, IS_OPENED) VALUES (?, ?, ?, 'code', ?, ?, 0, 1)",
-                UUID.randomUUID().toString(), menu, nextOrder(menu), reference, admin);
+                        + " (ID, MENU_ID, SORT_ORDER, TYPE, BODY, FILE_NAME, CREATED_BY, ALLOW_AI, IS_OPENED) VALUES (?, ?, ?, 'code', ?, ?, ?, 0, 1)",
+                UUID.randomUUID().toString(), menu, nextOrder(menu), body == null ? "" : body, reference, admin);
     }
 
     public String codeReference(String id) {
-        var rows = jdbc.queryForList("SELECT BODY FROM " + TABLE + " WHERE ID = ? AND TYPE = 'code' AND MENU_ID IS NOT NULL", String.class, id);
+        var rows = jdbc.queryForList("SELECT " + CODE_REFERENCE + " FROM " + TABLE
+                + " WHERE ID = ? AND TYPE = 'code' AND MENU_ID IS NOT NULL", String.class, id);
         if (rows.isEmpty()) throw notFound("Code block not found");
         return rows.getFirst();
     }
@@ -125,11 +132,14 @@ public class ContentService {
         if (patch.allowAi() != null) validatedAllowAi(patch.allowAi());
         BlockRow block = publishedBlock(id);
         requireMenu(block.menuId(), true);
-        if (block.type().equals("code") && (patch.body() != null || patch.fileUrl() != null)) {
+        boolean code = block.type().equals("code");
+        if (code && patch.fileUrl() != null) {
             throw badRequest("Use Add code to replace a saved source.");
         }
         if (patch.body() != null) {
-            jdbc.update("UPDATE " + TABLE + " SET BODY = ? WHERE ID = ?", validatedBody(patch.body(), block.type()), id);
+            String body = validatedBody(patch.body(), block.type());
+            if (code) updateCodeDescription(id, body);
+            else jdbc.update("UPDATE " + TABLE + " SET BODY = ? WHERE ID = ?", body, id);
         }
         if (patch.allowAi() != null) {
             jdbc.update("UPDATE " + TABLE + " SET ALLOW_AI = ? WHERE ID = ?", patch.allowAi(), id);
@@ -221,6 +231,11 @@ public class ContentService {
         return Math.addExact(maximum == null ? 0 : maximum, 1);
     }
 
+    private void updateCodeDescription(String id, String body) {
+        // Keep a legacy reference before replacing its BODY.
+        jdbc.update("UPDATE " + TABLE + " SET FILE_NAME = " + CODE_REFERENCE + ", BODY = ? WHERE ID = ?", body, id);
+    }
+
     private int validatedAllowAi(Integer value) {
         if (value != null && value != 0 && value != 1) throw badRequest("allow_ai must be 0 or 1");
         return value == null ? 0 : value;
@@ -273,8 +288,11 @@ public class ContentService {
     private record BlockRow(String id, String menuId, int sortOrder, String type, String body,
                             String fileName, String contentType, long fileSize, String createdBy, int allowAi, int isOpened) {
         BlockResponse response() {
-            return new BlockResponse(id, ContentMenuKey.menuId(menuId), type, body, fileName == null ? null : "/api/files/" + id,
-                    sortOrder, fileName, contentType, fileSize, allowAi, isOpened);
+            boolean code = type.equals("code");
+            boolean legacyCode = code && fileName == null;
+            return new BlockResponse(id, ContentMenuKey.menuId(menuId), type, legacyCode ? "" : body,
+                    code || fileName == null ? null : "/api/files/" + id,
+                    sortOrder, legacyCode ? body : fileName, contentType, fileSize, allowAi, isOpened);
         }
     }
 }

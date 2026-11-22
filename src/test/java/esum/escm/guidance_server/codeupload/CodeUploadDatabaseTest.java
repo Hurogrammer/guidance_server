@@ -5,10 +5,12 @@ import esum.escm.guidance_server.content.VideoStorage;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.springframework.core.io.FileSystemResource;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -26,6 +28,8 @@ import static org.mockito.Mockito.mock;
 
 @EnabledIfEnvironmentVariable(named = "JAVA_CODES_DB_TEST", matches = "true")
 class CodeUploadDatabaseTest {
+    private static final String LEGACY_PACKAGE = "p".repeat(200);
+    private static final String LEGACY_CLASS = "C".repeat(200);
     private static JdbcTemplate jdbc;
     private static CodeUploadService service;
     private static ContentService content;
@@ -50,7 +54,7 @@ class CodeUploadDatabaseTest {
                 """);
         jdbc.execute("CREATE TABLE PT_MENU_AMN (MENU_ID VARCHAR(20) PRIMARY KEY) ENGINE=InnoDB");
         jdbc.execute("CREATE TABLE MG_OPER_MENU_AMN (MENU_ID VARCHAR(20) PRIMARY KEY) ENGINE=InnoDB");
-        jdbc.execute("INSERT INTO PT_MENU_AMN VALUES ('menu-a'), ('menu-b')");
+        jdbc.execute("INSERT INTO PT_MENU_AMN VALUES ('menu-a'), ('menu-b'), ('menu-legacy')");
         jdbc.execute("INSERT INTO MG_OPER_MENU_AMN VALUES ('menu-a')");
         jdbc.execute("""
                 CREATE TABLE `CONTENT BLOCKS` (
@@ -63,6 +67,12 @@ class CodeUploadDatabaseTest {
                 """);
         jdbc.execute(Files.readString(Path.of("sql/java-codes-upload.sql")));
         jdbc.execute(Files.readString(Path.of("sql/code-content-block-type.sql")));
+        jdbc.update("INSERT INTO `JAVA_CODES` (`PACKAGE`, `CLASS_NAME`, `CLASS_TYPE`, `LANGUAGE_NAME`, `CODE`) VALUES (?, ?, 'class', 'java', 'legacy source')",
+                LEGACY_PACKAGE, LEGACY_CLASS);
+        jdbc.update("INSERT INTO `CONTENT BLOCKS` (ID, MENU_ID, SORT_ORDER, TYPE, BODY, CREATED_BY) VALUES ('legacy-code', 'menu-legacy', 1, 'code', ?, 'admin')",
+                LEGACY_PACKAGE + "." + LEGACY_CLASS);
+        jdbc.update("INSERT INTO `CONTENT BLOCKS` (ID, MENU_ID, SORT_ORDER, TYPE, FILE_NAME, BODY, CREATED_BY) VALUES ('legacy-image', 'menu-legacy', 2, 'image', 'photo.png', 'Image description', 'admin')");
+        new ResourceDatabasePopulator(new FileSystemResource("sql/code-block-descriptions.sql")).execute(database);
         content = new ContentService(jdbc, mock(VideoStorage.class));
         service = new CodeUploadService(jdbc, content);
         transaction = new TransactionTemplate(new DataSourceTransactionManager(database));
@@ -71,7 +81,7 @@ class CodeUploadDatabaseTest {
 
     @Test void savesExactSourceAndPublishesItsReferenceOnlyOnTheUploadingPage() {
         var source = new CodeUploadRequest("record", "org.예제", "RecordName", "import java.util.List;",
-                "\ufeffpackage org.예제;\r\n\t// A 🚀\r\nrecord RecordName() {}\r\n", " Java ");
+                "\ufeffpackage org.예제;\r\n\t// A 🚀\r\nrecord RecordName() {}\r\n", " Java ", "Example record\nfor this page");
         var saved = create("menu-a", null, source);
         assertEquals(HttpStatus.CREATED, saved.status());
         var row = jdbc.queryForMap("SELECT * FROM `JAVA_CODES` WHERE BINARY `PACKAGE`=? AND BINARY `CLASS_NAME`=?",
@@ -84,14 +94,31 @@ class CodeUploadDatabaseTest {
         assertEquals("java", row.get("LANGUAGE_NAME"));
         var block = content.list("menu-a").getFirst();
         assertEquals("code", block.type());
-        assertEquals("org.예제.RecordName", block.body());
+        assertEquals("org.예제.RecordName", block.fileName());
+        assertEquals(source.description(), block.body());
+        assertNull(block.fileUrl());
         assertEquals(source.code(), service.get(block.id()).code());
-        assertTrue(content.list("menu-b").stream().noneMatch(item -> item.body().equals(block.body())));
-        assertTrue(content.list("menu-a", "99").stream().noneMatch(item -> item.body().equals(block.body())));
+        assertTrue(content.list("menu-b").stream().noneMatch(item -> block.fileName().equals(item.fileName())));
+        assertTrue(content.list("menu-a", "99").stream().noneMatch(item -> block.fileName().equals(item.fileName())));
+    }
+
+    @Test void migratesLongLegacyReferencesAndAllowsDescriptionEdits() {
+        var blocks = content.list("menu-legacy");
+        var code = blocks.getFirst();
+        assertEquals(LEGACY_PACKAGE + "." + LEGACY_CLASS, code.fileName());
+        assertEquals("", code.body());
+        assertEquals(code.fileName(), jdbc.queryForObject("SELECT FILE_NAME FROM `CONTENT BLOCKS` WHERE ID='legacy-code'", String.class));
+        assertEquals("photo.png", blocks.get(1).fileName());
+        assertEquals("Image description", blocks.get(1).body());
+
+        var edited = transaction.execute(status -> content.update(code.id(), new ContentService.UpdateRequest("Updated\nnotes", null, null), "admin"));
+        assertEquals("Updated\nnotes", edited.body());
+        assertEquals(code.fileName(), edited.fileName());
+        assertEquals("legacy source", service.get(code.id()).code());
     }
 
     @Test void rollsBackSourceWhenAttachingToAnUnknownMenu() {
-        var source = new CodeUploadRequest(null, "", "rollback.py", null, "print(1)", "Python");
+        var source = new CodeUploadRequest(null, "", "rollback.py", null, "print(1)", "Python", null);
         var error = assertThrows(ResponseStatusException.class, () -> create("missing", null, source));
         assertEquals(HttpStatus.NOT_FOUND, error.getStatusCode());
         assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM `JAVA_CODES` WHERE `CLASS_NAME`='rollback.py'", Integer.class));
@@ -99,7 +126,7 @@ class CodeUploadDatabaseTest {
     }
 
     @Test void concurrentInsertCreatesOneRowAndStaleConfirmDoesNotReplaceIt() throws Exception {
-        var initial = python("one");
+        var initial = new CodeUploadRequest(null, "", "script.py", null, "one", "Python", "Operator notes");
         var start = new CountDownLatch(1);
         try (var pool = Executors.newFixedThreadPool(2)) {
             var a = pool.submit(() -> { start.await(); return create("menu-a", "99", initial); });
@@ -119,9 +146,11 @@ class CodeUploadDatabaseTest {
             assertEquals(HttpStatus.NO_CONTENT, replaced.status());
             var operator = content.list("menu-a", "99");
             assertEquals(1, operator.size());
-            assertEquals(".script.py", operator.getFirst().body());
+            assertEquals(".script.py", operator.getFirst().fileName());
+            assertEquals("Operator notes", operator.getFirst().body());
             assertEquals("three", service.get(operator.getFirst().id()).code());
-            assertEquals(".script.py", content.list("menu-b").getFirst().body());
+            assertEquals(".script.py", content.list("menu-b").getFirst().fileName());
+            assertEquals("", content.list("menu-b").getFirst().body());
             assertEquals("three", jdbc.queryForObject("SELECT `CODE` FROM `JAVA_CODES` WHERE `LANGUAGE_NAME`='python'", String.class));
         }
     }
@@ -135,7 +164,7 @@ class CodeUploadDatabaseTest {
     }
 
     private static CodeUploadRequest python(String code) {
-        return new CodeUploadRequest(null, "", "script.py", null, code, "Python");
+        return new CodeUploadRequest(null, "", "script.py", null, code, "Python", null);
     }
 
     private static String quote(String revision) {

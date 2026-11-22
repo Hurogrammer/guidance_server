@@ -22,7 +22,8 @@ class CodeUploadControllerTest {
     private static final String ADMIN = "Bearer admin-fixture";
     private static final String JSON = """
             {"class_type":"abstract_class","package":"org.example","class_name":"Upload",
-             "imports":"import java.util.List;","code":"  // fixture\\n","language_name":" Java "}
+             "imports":"import java.util.List;","code":"  // fixture\\n","language_name":" Java ",
+             "description":"Document-specific notes"}
             """;
     private final ContentAdminClient auth = mock(ContentAdminClient.class);
     private final ContentService blocks = mock(ContentService.class);
@@ -42,7 +43,7 @@ class CodeUploadControllerTest {
                 .andExpect(status().isCreated());
         verify(jdbc).update(contains("`CLASS_TYPE`, `PACKAGE`, `CLASS_NAME`, `IMPORTS`, `CODE`, `LANGUAGE_NAME`"),
                 eq("abstract_class"), eq("org.example"), eq("Upload"), eq("import java.util.List;"), eq("  // fixture\n"), eq("java"));
-        verify(blocks).attachCode("01001001", "99", "org.example.Upload", "admin");
+        verify(blocks).attachCode("01001001", "99", "org.example.Upload", "Document-specific notes", "admin");
     }
 
     @Test void bothWritesRequireAValidAdminSession() throws Exception {
@@ -105,10 +106,10 @@ class CodeUploadControllerTest {
 
     @Test void limitsUtf8SourceBytesAndUnicodeMetadata() {
         assertEquals(HttpStatus.CONTENT_TOO_LARGE, assertThrows(ResponseStatusException.class,
-                () -> new CodeUploadRequest(null, "", "example", null, "한".repeat(333_334), "Python").validated()).getStatusCode());
+                () -> new CodeUploadRequest(null, "", "example", null, "한".repeat(333_334), "Python", null).validated()).getStatusCode());
         assertEquals(HttpStatus.BAD_REQUEST, assertThrows(ResponseStatusException.class,
-                () -> new CodeUploadRequest(null, "", "🚀".repeat(201), null, "source", "Python").validated()).getStatusCode());
+                () -> new CodeUploadRequest(null, "", "🚀".repeat(201), null, "source", "Python", null).validated()).getStatusCode());
         assertEquals("🚀".repeat(200),
-                new CodeUploadRequest(null, "", "🚀".repeat(200), null, "source", "Python").validated().className());
+                new CodeUploadRequest(null, "", "🚀".repeat(200), null, "source", "Python", null).validated().className());
     }
 }
